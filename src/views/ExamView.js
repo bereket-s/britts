@@ -2,7 +2,7 @@
  * Exam View — Interactive exam session with timer, all question types, and results
  */
 
-import { getExam, saveResult } from '../services/db.js';
+import { getExam, saveResult, getDocuments } from '../services/db.js';
 import { ExamEngine, formatTime, getGradeInfo } from '../services/examEngine.js';
 import { createProgressRing } from '../components/ProgressRing.js';
 import { showToast } from '../components/Toast.js';
@@ -12,21 +12,20 @@ import { navigate } from '../router.js';
 let engine = null;
 
 export async function renderExamView(container, examId) {
-  let exam;
+  let exam, docs = [];
   try {
     exam = await getExam(examId);
     if (!exam) { showToast('Exam not found', 'error'); navigate('dashboard'); return; }
+    if (exam.courseId) docs = await getDocuments(exam.courseId);
   } catch (err) {
     showToast('Failed to load exam', 'error');
     navigate('dashboard');
     return;
   }
-
-  // Show start screen first
-  renderStartScreen(container, exam, examId);
+  renderStartScreen(container, exam, examId, docs);
 }
 
-function renderStartScreen(container, exam, examId) {
+function renderStartScreen(container, exam, examId, docs = []) {
   container.innerHTML = `
     <div class="page-wrapper page-animate" style="max-width:700px;margin:0 auto">
       <div class="card" style="margin-top:2rem">
@@ -73,7 +72,7 @@ function renderStartScreen(container, exam, examId) {
   `;
 
   container.querySelector('#back-btn')?.addEventListener('click', () => window.history.back());
-  container.querySelector('#start-btn')?.addEventListener('click', () => startExam(container, exam, examId));
+  container.querySelector('#start-btn')?.addEventListener('click', () => startExam(container, exam, examId, docs));
 }
 
 function countQuestions(exam) {
@@ -85,11 +84,9 @@ function countQuestions(exam) {
   return count;
 }
 
-function startExam(container, exam, examId) {
+function startExam(container, exam, examId, docs = []) {
   engine = new ExamEngine(exam);
-
   renderExamSheet(container, exam, examId);
-
   engine.start((remaining) => {
     const timerEl = document.getElementById('exam-timer-value');
     const timerWrap = document.getElementById('exam-timer');
@@ -97,14 +94,24 @@ function startExam(container, exam, examId) {
     if (timerWrap) {
       timerWrap.className = 'exam-timer' + (remaining.totalSeconds < 300 ? ' danger' : remaining.totalSeconds < 600 ? ' warning' : '');
     }
-    if (remaining.totalSeconds <= 0) {
-      submitExam(container, exam, examId, true);
-    }
-
-    // Update progress
+    if (remaining.totalSeconds <= 0) submitExam(container, exam, examId, true, docs);
     const prog = engine.getProgress();
     const progEl = document.getElementById('exam-progress-label');
     if (progEl) progEl.textContent = `${prog.answered} / ${prog.total} answered`;
+  });
+
+  // Wire submit button with docs
+  container.querySelector('#submit-exam-btn')?.addEventListener('click', async () => {
+    const prog = engine.getProgress();
+    if (prog.answered < prog.total) {
+      const confirmed = await showConfirm({
+        title: 'Submit Exam?',
+        message: `You have answered ${prog.answered} of ${prog.total} questions. Submit anyway?`,
+        confirmText: 'Submit',
+      });
+      if (!confirmed) return;
+    }
+    submitExam(container, exam, examId, false, docs);
   });
 }
 
@@ -178,14 +185,9 @@ function renderExamSheet(container, exam, examId) {
     opt.addEventListener('click', () => {
       const questionId = opt.dataset.qid;
       const value = opt.dataset.value;
-
-      // Deselect others
       container.querySelectorAll(`.mcq-option[data-qid="${questionId}"]`).forEach(o => o.classList.remove('selected'));
       opt.classList.add('selected');
-
       engine.setAnswer(questionId, value);
-
-      // Mark question as answered
       const qCard = document.getElementById(`qcard_${questionId}`);
       if (qCard) qCard.classList.add('answered');
     });
@@ -196,9 +198,7 @@ function renderExamSheet(container, exam, examId) {
     ta.addEventListener('input', () => {
       engine.setAnswer(ta.dataset.qid, ta.value);
       const qCard = document.getElementById(`qcard_${ta.dataset.qid}`);
-      if (qCard) {
-        qCard.classList.toggle('answered', ta.value.trim().length > 0);
-      }
+      if (qCard) qCard.classList.toggle('answered', ta.value.trim().length > 0);
     });
   });
 
@@ -206,18 +206,7 @@ function renderExamSheet(container, exam, examId) {
     showToast('Progress saved locally', 'success');
   });
 
-  container.querySelector('#submit-exam-btn')?.addEventListener('click', async () => {
-    const prog = engine.getProgress();
-    if (prog.answered < prog.total) {
-      const confirmed = await showConfirm({
-        title: 'Submit Exam?',
-        message: `You have answered ${prog.answered} of ${prog.total} questions. Submit anyway?`,
-        confirmText: 'Submit',
-      });
-      if (!confirmed) return;
-    }
-    submitExam(container, exam, examId, false);
-  });
+  // submit is now wired in startExam to have access to docs
 }
 
 function renderMCQQuestions(questions) {
@@ -289,35 +278,50 @@ function renderCaseStudy(caseStudy) {
   `;
 }
 
-async function submitExam(container, exam, examId, isTimeout) {
+async function submitExam(container, exam, examId, isTimeout, docs = []) {
   if (!engine) return;
   engine.stopTimer();
   engine.submitted = true;
-
   const summary = engine.getSummary();
-
-  // Save result
   try {
-    await saveResult({
-      examId,
-      courseId: exam.courseId,
-      ...summary,
-    });
+    await saveResult({ examId, courseId: exam.courseId, ...summary });
   } catch (err) {
     console.warn('Could not save result:', err);
   }
-
   if (isTimeout) showToast("⏰ Time's up! Exam submitted automatically.", 'warning', 5000);
-
-  renderResults(container, exam, summary);
+  renderResults(container, exam, summary, docs);
   launchConfetti();
 }
 
-function renderResults(container, exam, summary) {
+function renderResults(container, exam, summary, docs = []) {
   const s = exam.sections;
   const mcqScore = summary.mcq;
-  const maxMCQ = 10;
-  const gradeInfo = getGradeInfo(mcqScore.marks, 60); // Approximate grade on MCQ portion
+  const gradeInfo = getGradeInfo(mcqScore.marks, 60);
+
+  // Build source-docs HTML (used inside each question card)
+  const sourceDocsHtml = docs.length > 0 ? `
+    <details style="margin-top:0.75rem">
+      <summary style="cursor:pointer;font-size:0.75rem;font-weight:700;color:var(--accent-light);
+                      display:flex;align-items:center;gap:0.4rem;list-style:none;user-select:none">
+        📚 Study source documents (${docs.length})
+      </summary>
+      <div style="margin-top:0.6rem;display:flex;flex-direction:column;gap:0.35rem;padding-left:0.5rem">
+        ${docs.map(d => {
+          const ext = (d.name || '').split('.').pop().toLowerCase();
+          const icon = ['pdf'].includes(ext) ? '📄' : ['doc','docx'].includes(ext) ? '📝' :
+                       ['ppt','pptx'].includes(ext) ? '📊' : ['xls','xlsx'].includes(ext) ? '📈' :
+                       ['jpg','jpeg','png','gif','webp','svg'].includes(ext) ? '🖼️' : '📎';
+          return `<a href="${d.url}" target="_blank" rel="noopener"
+                    style="font-size:0.78rem;color:var(--text-secondary);text-decoration:none;
+                           display:flex;align-items:center;gap:0.4rem;padding:0.3rem 0.5rem;
+                           border-radius:4px;transition:background 0.15s"
+                    onmouseover="this.style.background='var(--bg-elevated)'"
+                    onmouseout="this.style.background=''"
+                  >${icon} ${d.name}</a>`;
+        }).join('')}
+      </div>
+    </details>
+  ` : '';
 
   container.innerHTML = `
     <div class="page-wrapper page-animate">
@@ -325,26 +329,15 @@ function renderResults(container, exam, summary) {
         <div style="margin-bottom:1rem;font-size:3rem">🎉</div>
         <h1 style="font-family:var(--font-display);font-size:1.5rem;font-weight:800;margin-bottom:0.5rem">Exam Complete!</h1>
         <p style="color:var(--text-muted);margin-bottom:2rem">${exam.title}</p>
-
         <div style="display:flex;justify-content:center;margin-bottom:1.5rem">
-          ${createProgressRing(mcqScore.marks, maxMCQ, 140)}
+          ${createProgressRing(mcqScore.marks, 10, 140)}
         </div>
         <div class="results-score-text">MCQ Score: ${mcqScore.correct}/${mcqScore.total} correct</div>
         <p style="font-size:0.85rem;color:var(--text-muted);margin-top:0.25rem">Written answers are shown below with model answers for self-marking</p>
-
         <div class="results-breakdown">
-          <div class="breakdown-item">
-            <div class="breakdown-label">Time Taken</div>
-            <div class="breakdown-value">${formatTime(summary.timeTaken)}</div>
-          </div>
-          <div class="breakdown-item">
-            <div class="breakdown-label">Questions Answered</div>
-            <div class="breakdown-value">${summary.totalAnswered}/${summary.totalQuestions}</div>
-          </div>
-          <div class="breakdown-item">
-            <div class="breakdown-label">MCQ Marks</div>
-            <div class="breakdown-value" style="color:var(--success)">${mcqScore.marks}/10</div>
-          </div>
+          <div class="breakdown-item"><div class="breakdown-label">Time Taken</div><div class="breakdown-value">${formatTime(summary.timeTaken)}</div></div>
+          <div class="breakdown-item"><div class="breakdown-label">Questions Answered</div><div class="breakdown-value">${summary.totalAnswered}/${summary.totalQuestions}</div></div>
+          <div class="breakdown-item"><div class="breakdown-label">MCQ Marks</div><div class="breakdown-value" style="color:var(--success)">${mcqScore.marks}/10</div></div>
         </div>
       </div>
 
@@ -355,7 +348,7 @@ function renderResults(container, exam, summary) {
           <div class="section-divider-label">📋 Section A — MCQ Review</div>
           <div class="section-divider-line"></div>
         </div>
-        ${renderMCQResults(s.mcq.questions, summary.answers)}
+        ${renderMCQResults(s.mcq.questions, summary.answers, sourceDocsHtml)}
       ` : ''}
 
       <!-- Short/Long Review -->
@@ -365,7 +358,7 @@ function renderResults(container, exam, summary) {
           <div class="section-divider-label">✏️ Section B — Written Answers</div>
           <div class="section-divider-line"></div>
         </div>
-        ${renderWrittenResults(s.shortLong.questions, summary.answers)}
+        ${renderWrittenResults(s.shortLong.questions, summary.answers, false, sourceDocsHtml)}
       ` : ''}
 
       <!-- Case Study Review -->
@@ -379,7 +372,7 @@ function renderResults(container, exam, summary) {
           <div class="case-study-context-label">Case: ${s.caseStudy.scenario?.title}</div>
           ${s.caseStudy.scenario?.context?.split('\n').map(p => `<p style="margin-bottom:0.75rem">${p}</p>`).join('') || ''}
         </div>
-        ${renderWrittenResults(s.caseStudy.subQuestions || [], summary.answers, true)}
+        ${renderWrittenResults(s.caseStudy.subQuestions || [], summary.answers, true, sourceDocsHtml)}
       ` : ''}
 
       <div style="text-align:center;padding:2rem 0">
@@ -390,11 +383,10 @@ function renderResults(container, exam, summary) {
   `;
 }
 
-function renderMCQResults(questions, answers) {
+function renderMCQResults(questions, answers, sourceDocsHtml = '') {
   return questions.map((q, idx) => {
     const userAnswer = answers[q.id];
     const isCorrect = userAnswer?.toUpperCase() === q.correctAnswer?.toUpperCase();
-
     return `
       <div class="question-card ${isCorrect ? 'correct' : 'incorrect'}" style="margin-bottom:1rem">
         <div class="question-header">
@@ -421,19 +413,19 @@ function renderMCQResults(questions, answers) {
           <div class="model-answer">
             <div class="model-answer-label">💡 Explanation</div>
             ${q.explanation}
+            ${sourceDocsHtml}
           </div>
-        ` : ''}
+        ` : sourceDocsHtml ? `<div class="model-answer">${sourceDocsHtml}</div>` : ''}
       </div>
     `;
   }).join('');
 }
 
-function renderWrittenResults(questions, answers, isCaseStudy = false) {
+function renderWrittenResults(questions, answers, isCaseStudy = false, sourceDocsHtml = '') {
   let qNum = isCaseStudy ? null : 11;
   return questions.map(q => {
     const userAnswer = answers[q.id] || '';
     const label = isCaseStudy ? `(${q.label})` : qNum++;
-
     return `
       <div class="question-card" style="margin-bottom:1rem">
         <div class="question-header">
@@ -441,7 +433,6 @@ function renderWrittenResults(questions, answers, isCaseStudy = false) {
           <div class="question-text">${q.text}</div>
           <span class="question-marks">${q.marks} marks</span>
         </div>
-
         ${userAnswer.trim() ? `
           <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-md);padding:0.875rem 1rem;font-size:0.875rem;color:var(--text-secondary);margin-bottom:0.75rem;line-height:1.6;">
             <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-muted);margin-bottom:0.5rem;font-weight:700;">Your Answer</div>
@@ -452,7 +443,6 @@ function renderWrittenResults(questions, answers, isCaseStudy = false) {
             ⚠️ Not answered
           </div>
         `}
-
         <div class="model-answer">
           <div class="model-answer-label">✅ Model Answer (${q.marks} marks)</div>
           ${q.modelAnswer || 'No model answer available.'}
@@ -464,6 +454,7 @@ function renderWrittenResults(questions, answers, isCaseStudy = false) {
               </ul>
             </div>
           ` : ''}
+          ${sourceDocsHtml}
         </div>
       </div>
     `;

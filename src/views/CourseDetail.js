@@ -231,31 +231,28 @@ async function viewDocument(doc) {
   const mime = doc.mimeType || '';
   const url  = doc.url  || '';
 
-  if (!url) {
-    showToast('No preview available — file URL is missing', 'error');
-    return;
-  }
+  if (!url) { showToast('No preview available — file has no URL', 'error'); return; }
 
-  const isImage = mime.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(name);
-  const isPDF   = mime === 'application/pdf'  || /\.pdf$/i.test(name);
+  const ext     = name.split('.').pop().toLowerCase();
+  const isImage = mime.startsWith('image/') || ['jpg','jpeg','png','gif','webp','bmp','svg'].includes(ext);
+  const isPDF   = mime === 'application/pdf' || ext === 'pdf';
 
-  // ── Images — show inline, no download needed ──────────────────────────────
+  // ── Images — inline preview ──────────────────────────────────────────────────
   if (isImage) {
     showModal({
       title: `🖼️ ${name}`,
-      body: `
-        <div style="text-align:center;background:var(--bg-base);border-radius:var(--radius-md);padding:1rem">
-          <img src="${url}" alt="${name}"
-               style="max-width:100%;max-height:65vh;object-fit:contain;border-radius:6px;"
-               loading="lazy" />
-        </div>`,
+      body: `<div style="text-align:center;background:var(--bg-base);padding:1rem;border-radius:8px">
+               <img src="${url}" alt="${name}"
+                    style="max-width:100%;max-height:65vh;object-fit:contain;border-radius:6px;"
+                    loading="lazy" />
+             </div>`,
       footer: `<a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open full size ↗</a>`,
       onClose: () => {},
     });
     return;
   }
 
-  // ── PDFs — embed directly in an iframe ───────────────────────────────────
+  // ── PDFs — embedded viewer ──────────────────────────────────────────────
   if (isPDF) {
     showModal({
       title: `📄 ${name}`,
@@ -266,9 +263,25 @@ async function viewDocument(doc) {
     return;
   }
 
-  // ── All other formats (DOCX, PPTX, XLSX, etc.) — open/download directly ─
-  // Browser handles it: Office files trigger a download, no parsing needed.
-  window.open(url, '_blank', 'noopener');
+  // ── All other formats (DOCX, PPTX, XLSX …) ─────────────────────────
+  // Use a modal with an <a> tag — clicking an anchor is always a direct user
+  // gesture so it won’t be blocked by popup blockers (unlike window.open after await).
+  const info = getFileTypeInfo({ name, type: mime });
+  showModal({
+    title: `${info?.icon || '📎'} ${name}`,
+    body: `
+      <div style="text-align:center;padding:2.5rem 1rem">
+        <div style="font-size:4rem;margin-bottom:1rem">${info?.icon || '📎'}</div>
+        <p style="color:var(--text-secondary);font-size:0.95rem;margin-bottom:0.4rem">${name}</p>
+        <p style="font-size:0.8rem;color:var(--text-muted);line-height:1.6">
+          ${ext.toUpperCase()} files open in your system’s default app<br/>
+          (Microsoft Office, LibreOffice, etc.)
+        </p>
+      </div>`,
+    footer: `<a href="${url}" target="_blank" rel="noopener" download="${name}" class="btn btn-primary">⬇️ Download &amp; Open</a>
+              <a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open in browser ↗</a>`,
+    onClose: () => {},
+  });
 }
 
 
