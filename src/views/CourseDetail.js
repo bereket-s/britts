@@ -226,81 +226,9 @@ function renderDocumentList(container, docs, courseId, courseName) {
 }
 
 async function viewDocument(doc) {
-  const { showModal } = await import('../components/Modal.js');
-  const name = doc.name || 'Document';
-  const mime = doc.mimeType || '';
-  const url  = doc.url  || '';
-
-  if (!url) { showToast('No preview available — file has no URL', 'error'); return; }
-
-  const ext     = name.split('.').pop().toLowerCase();
-  const isImage = mime.startsWith('image/') || ['jpg','jpeg','png','gif','webp','bmp','svg'].includes(ext);
-  const isPDF   = mime === 'application/pdf' || ext === 'pdf';
-
-  // ── Images — inline preview ──────────────────────────────────────────────────
-  if (isImage) {
-    showModal({
-      title: `🖼️ ${name}`,
-      body: `<div style="text-align:center;background:var(--bg-base);padding:1rem;border-radius:8px">
-               <img src="${url}" alt="${name}"
-                    style="max-width:100%;max-height:65vh;object-fit:contain;border-radius:6px;"
-                    loading="lazy" />
-             </div>`,
-      footer: `<a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open full size ↗</a>`,
-      onClose: () => {},
-    });
-    return;
-  }
-
-  // ── PDFs — embedded viewer ──────────────────────────────────────────────
-  if (isPDF) {
-    showModal({
-      title: `📄 ${name}`,
-      body: `<iframe src="${url}#toolbar=1" style="width:100%;height:70vh;border:none;border-radius:var(--radius-md);" title="${name}"></iframe>`,
-      footer: `<a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open in new tab ↗</a>`,
-      onClose: () => {},
-    });
-    return;
-  }
-
-  // ── Office documents — Microsoft Office Online Viewer ───────────────────────
-  // Works for .doc/.docx, .ppt/.pptx, .xls/.xlsx — URL must be publicly accessible.
-  const officeExts = ['doc','docx','ppt','pptx','xls','xlsx','odt','odp','ods'];
-  if (officeExts.includes(ext)) {
-    // Office Online viewer requires a publicly accessible URL
-    const viewerUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}`;
-    showModal({
-      title: `📋 ${name}`,
-      body: `
-        <iframe src="${viewerUrl}"
-                style="width:100%;height:75vh;border:none;border-radius:var(--radius-md);"
-                title="${name}"
-                loading="lazy"
-                allowfullscreen>
-        </iframe>`,
-      footer: `
-        <a href="${url}" target="_blank" rel="noopener" download="${name}" class="btn btn-secondary">⬇️ Download</a>
-        <a href="https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(url)}" target="_blank" rel="noopener" class="btn btn-primary">Open in Office Online ↗</a>`,
-      onClose: () => {},
-    });
-    return;
-  }
-
-  // ── Fallback for any other format ───────────────────────────────────────────
-  const info = getFileTypeInfo({ name, type: mime });
-  showModal({
-    title: `${info?.icon || '📎'} ${name}`,
-    body: `
-      <div style="text-align:center;padding:2.5rem 1rem">
-        <div style="font-size:4rem;margin-bottom:1rem">${info?.icon || '📎'}</div>
-        <p style="color:var(--text-secondary);font-size:0.95rem;margin-bottom:0.4rem">${name}</p>
-        <p style="font-size:0.8rem;color:var(--text-muted);line-height:1.6">
-          Click below to download and open this file
-        </p>
-      </div>`,
-              <a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open in browser ↗</a>`,
-    onClose: () => {},
-  });
+  if (!doc.url) { showToast('No preview available — file has no URL', 'error'); return; }
+  const { openDocumentViewer } = await import('../components/DocumentViewer.js');
+  openDocumentViewer(doc);
 }
 
 
