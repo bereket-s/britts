@@ -97,46 +97,34 @@ async function renderDocumentsTab(container, courseId, courseName) {
     </div>
   `;
 
-  // Init upload zone
   createUploadZone(
     container.querySelector('#upload-zone-container'),
     (files) => handleFileUpload(files, courseId, courseName)
   );
 
-  // Load files
   const docs = await getDocuments(courseId);
-  const fileListEl = container.querySelector('#file-list-container');
-
-  if (docs.length === 0) {
-    fileListEl.innerHTML = `<div class="empty-state"><span class="empty-icon">📂</span><p class="empty-title">No documents yet</p><p class="empty-desc">Upload documents above to start generating study materials</p></div>`;
-  } else {
-    fileListEl.innerHTML = renderFileList(docs, true);
-
-    // Delete file buttons
-    fileListEl.querySelectorAll('[data-delete]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const docId = btn.dataset.delete;
-        const confirmed = await showConfirm({
-          title: 'Remove Document',
-          message: 'Remove this document from the course? Notes and exams generated from it will remain.',
-          confirmText: 'Remove',
-          danger: true,
-        });
-        if (confirmed) {
-          await deleteDocument(docId, courseId);
-          showToast('Document removed', 'success');
-          renderDocumentsTab(container, courseId, courseName);
-        }
-      });
-    });
-  }
+  renderDocumentList(container.querySelector('#file-list-container'), docs, courseId, courseName);
 }
 
 async function handleFileUpload(files, courseId, courseName) {
   const fileListEl = document.getElementById('file-list-container');
 
-  // Show uploading state
-  const uploadingHtml = files.map(f => `
+  // ── Duplicate detection ──────────────────────────────────────────────────
+  const existingDocs = await getDocuments(courseId);
+  const existingNames = new Set(existingDocs.map(d => d.name.toLowerCase()));
+  const duplicates = files.filter(f => existingNames.has(f.name.toLowerCase()));
+  const newFiles   = files.filter(f => !existingNames.has(f.name.toLowerCase()));
+
+  if (duplicates.length > 0) {
+    showToast(
+      `⚠️ Skipped ${duplicates.length} duplicate file${duplicates.length > 1 ? 's' : ''}: ${duplicates.map(f => f.name).join(', ')}`,
+      'warning', 6000
+    );
+  }
+  if (newFiles.length === 0) return;
+
+  // ── Show uploading placeholders ──────────────────────────────────────────
+  const uploadingHtml = newFiles.map(f => `
     <div class="file-item" id="uploading_${f.name.replace(/[^a-z0-9]/gi, '_')}">
       <div class="file-icon ${getFileTypeInfo(f)?.color || 'txt'}">${getFileTypeInfo(f)?.icon || '📎'}</div>
       <div class="file-info">
@@ -153,19 +141,12 @@ async function handleFileUpload(files, courseId, courseName) {
     fileListEl.querySelector('.file-list').insertAdjacentHTML('afterbegin', uploadingHtml);
   }
 
+  // ── Upload each file ─────────────────────────────────────────────────────
   let successCount = 0;
-  for (const file of files) {
+  for (const file of newFiles) {
     try {
-      // Upload to Supabase Storage (or data URL fallback)
       const { url } = await uploadFile(courseId, file);
-
-      // Store file record in DB
-      await addDocument(courseId, {
-        name: file.name,
-        mimeType: file.type,
-        size: file.size,
-        url,
-      });
+      await addDocument(courseId, { name: file.name, mimeType: file.type, size: file.size, url });
       successCount++;
     } catch (err) {
       console.error('Upload failed for', file.name, err);
@@ -174,20 +155,53 @@ async function handleFileUpload(files, courseId, courseName) {
   }
 
   if (successCount > 0) {
-    showToast(`${successCount} document${successCount > 1 ? 's' : ''} uploaded successfully!`, 'success');
-    // Refresh document list
+    showToast(`${successCount} document${successCount > 1 ? 's' : ''} uploaded! ✅`, 'success');
     const docs = await getDocuments(courseId);
-    fileListEl.innerHTML = renderFileList(docs, true);
-    attachDeleteHandlers(fileListEl, courseId, courseName);
-
-    // Refresh sidebar badge count
+    renderDocumentList(fileListEl, docs, courseId, courseName);
     const { getCourses } = await import('../services/db.js');
-    const courses = await getCourses();
-    renderSidebar(courses);
+    renderSidebar(await getCourses());
   }
 }
 
-function attachDeleteHandlers(container, courseId, courseName) {
+// ─── Document List + Viewer ──────────────────────────────────────────────────
+
+function renderDocumentList(container, docs, courseId, courseName) {
+  if (docs.length === 0) {
+    container.innerHTML = `<div class="empty-state"><span class="empty-icon">📂</span><p class="empty-title">No documents yet</p><p class="empty-desc">Upload documents above to start generating study materials</p></div>`;
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="file-list">
+      ${docs.map(doc => {
+        const info = getFileTypeInfo({ name: doc.name, type: doc.mimeType });
+        return `
+          <div class="file-item" data-doc-id="${doc.id}">
+            <div class="file-icon ${info?.color || 'txt'}">${info?.icon || '📎'}</div>
+            <div class="file-info">
+              <div class="file-name">${doc.name}</div>
+              <div class="file-meta">${formatFileSize(doc.size)} · ${formatDate(doc.uploadedAt)}</div>
+            </div>
+            <div style="display:flex;gap:0.5rem;align-items:center;flex-shrink:0">
+              <button class="btn btn-secondary btn-sm" data-view="${doc.id}" title="Preview file">👁 View</button>
+              <button class="btn btn-ghost btn-sm" data-delete="${doc.id}" title="Remove file" style="color:var(--error)">🗑️</button>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  // View handlers
+  const allDocs = docs;
+  container.querySelectorAll('[data-view]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const doc = allDocs.find(d => d.id === btn.dataset.view);
+      if (doc) viewDocument(doc);
+    });
+  });
+
+  // Delete handlers
   container.querySelectorAll('[data-delete]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const docId = btn.dataset.delete;
@@ -200,13 +214,99 @@ function attachDeleteHandlers(container, courseId, courseName) {
       if (confirmed) {
         await deleteDocument(docId, courseId);
         showToast('Document removed', 'success');
-        const docs = await getDocuments(courseId);
-        container.innerHTML = renderFileList(docs, true);
-        attachDeleteHandlers(container, courseId, courseName);
+        const updated = await getDocuments(courseId);
+        renderDocumentList(container, updated, courseId, courseName);
       }
     });
   });
 }
+
+async function viewDocument(doc) {
+  const { showModal } = await import('../components/Modal.js');
+  const name = doc.name || '';
+  const mime = doc.mimeType || '';
+  const url  = doc.url || '';
+
+  const isImage = mime.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(name);
+  const isPDF   = mime === 'application/pdf' || /\.pdf$/i.test(name);
+  const isText  = mime.startsWith('text/') || /\.(txt|md|csv|json)$/i.test(name);
+
+  // ── Images ────────────────────────────────────────────────────────────────
+  if (isImage && url) {
+    showModal({
+      title: `🖼️ ${name}`,
+      body: `<div style="text-align:center"><img src="${url}" alt="${name}" style="max-width:100%;max-height:65vh;object-fit:contain;border-radius:8px;" /></div>`,
+      footer: `<a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open full size ↗</a>`,
+      onClose: () => {},
+    });
+    return;
+  }
+
+  // ── PDFs ──────────────────────────────────────────────────────────────────
+  if (isPDF && url) {
+    showModal({
+      title: `📄 ${name}`,
+      body: `<iframe src="${url}" style="width:100%;height:65vh;border:none;border-radius:8px;background:#fff" title="${name}"></iframe>`,
+      footer: `<a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open in new tab ↗</a>`,
+      onClose: () => {},
+    });
+    return;
+  }
+
+  // ── All other formats: parse and show text preview ─────────────────────
+  const loadingModal = showModal({
+    title: `👁 ${name}`,
+    body: `<div style="text-align:center;padding:3rem"><div style="font-size:2.5rem">⏳</div><p style="margin-top:0.75rem;color:var(--text-muted)">Extracting content...</p></div>`,
+    footer: '',
+    onClose: () => {},
+  });
+
+  try {
+    let file;
+    if (url) {
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      file = new File([blob], name, { type: mime });
+    } else {
+      throw new Error('No URL available for this document');
+    }
+
+    const parsed = await parseFile(file);
+    const content = parsed.content || '';
+    const preview = content.length > 12000 ? content.slice(0, 12000) + '\n\n… [content truncated]' : content;
+
+    const modalBody = loadingModal.el.querySelector('.modal-body');
+    if (modalBody) {
+      if (parsed.type === 'image') {
+        modalBody.innerHTML = `<div style="text-align:center"><img src="data:${parsed.mimeType};base64,${parsed.base64}" alt="${name}" style="max-width:100%;max-height:65vh;object-fit:contain;border-radius:8px"/></div>`;
+      } else {
+        modalBody.innerHTML = `
+          <div style="max-height:65vh;overflow-y:auto">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
+              <span style="font-size:0.75rem;color:var(--text-muted)">${content.length.toLocaleString()} characters extracted</span>
+              <button class="btn btn-secondary btn-sm" id="copy-doc-text">📋 Copy Text</button>
+            </div>
+            <pre style="white-space:pre-wrap;word-break:break-word;font-size:0.8rem;color:var(--text-secondary);line-height:1.65;font-family:var(--font-mono);background:var(--bg-base);padding:1rem;border-radius:var(--radius-md);border:1px solid var(--border)">${escapeHtml(preview)}</pre>
+          </div>
+        `;
+        modalBody.querySelector('#copy-doc-text')?.addEventListener('click', () => {
+          navigator.clipboard.writeText(content);
+          showToast('Text copied!', 'success');
+        });
+      }
+    }
+  } catch (err) {
+    const modalBody = loadingModal.el.querySelector('.modal-body');
+    if (modalBody) {
+      modalBody.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--error)">❌ Could not preview this file: ${err.message}</div>`;
+    }
+  }
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 
 // ─── Notes Tab ───────────────────────────────────────────────────────────────
 
