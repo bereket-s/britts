@@ -8,10 +8,11 @@ export default defineConfig({
     chunkSizeWarningLimit: 2000,
     rollupOptions: {
       output: {
-        manualChunks: {
-          pdfjs: ['pdfjs-dist'],
-          supabase: ['@supabase/supabase-js'],
-          parsers: ['mammoth', 'xlsx', 'jszip'],
+        manualChunks(id) {
+          if (id.includes('pdfjs-dist')) return 'pdfjs';
+          if (id.includes('@supabase')) return 'supabase';
+          if (id.includes('mammoth') || id.includes('xlsx') || id.includes('jszip')) return 'parsers';
+          if (id.includes('@google/generative-ai')) return 'gemini';
         },
       },
     },
