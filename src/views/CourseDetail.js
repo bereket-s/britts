@@ -263,9 +263,30 @@ async function viewDocument(doc) {
     return;
   }
 
-  // ── All other formats (DOCX, PPTX, XLSX …) ─────────────────────────
-  // Use a modal with an <a> tag — clicking an anchor is always a direct user
-  // gesture so it won’t be blocked by popup blockers (unlike window.open after await).
+  // ── Office documents — Microsoft Office Online Viewer ───────────────────────
+  // Works for .doc/.docx, .ppt/.pptx, .xls/.xlsx — URL must be publicly accessible.
+  const officeExts = ['doc','docx','ppt','pptx','xls','xlsx','odt','odp','ods'];
+  if (officeExts.includes(ext)) {
+    // Office Online viewer requires a publicly accessible URL
+    const viewerUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}`;
+    showModal({
+      title: `📋 ${name}`,
+      body: `
+        <iframe src="${viewerUrl}"
+                style="width:100%;height:75vh;border:none;border-radius:var(--radius-md);"
+                title="${name}"
+                loading="lazy"
+                allowfullscreen>
+        </iframe>`,
+      footer: `
+        <a href="${url}" target="_blank" rel="noopener" download="${name}" class="btn btn-secondary">⬇️ Download</a>
+        <a href="https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(url)}" target="_blank" rel="noopener" class="btn btn-primary">Open in Office Online ↗</a>`,
+      onClose: () => {},
+    });
+    return;
+  }
+
+  // ── Fallback for any other format ───────────────────────────────────────────
   const info = getFileTypeInfo({ name, type: mime });
   showModal({
     title: `${info?.icon || '📎'} ${name}`,
@@ -274,11 +295,9 @@ async function viewDocument(doc) {
         <div style="font-size:4rem;margin-bottom:1rem">${info?.icon || '📎'}</div>
         <p style="color:var(--text-secondary);font-size:0.95rem;margin-bottom:0.4rem">${name}</p>
         <p style="font-size:0.8rem;color:var(--text-muted);line-height:1.6">
-          ${ext.toUpperCase()} files open in your system’s default app<br/>
-          (Microsoft Office, LibreOffice, etc.)
+          Click below to download and open this file
         </p>
       </div>`,
-    footer: `<a href="${url}" target="_blank" rel="noopener" download="${name}" class="btn btn-primary">⬇️ Download &amp; Open</a>
               <a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open in browser ↗</a>`,
     onClose: () => {},
   });
