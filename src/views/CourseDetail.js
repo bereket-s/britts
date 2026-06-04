@@ -2,7 +2,7 @@
  * Course Detail view — Documents, Notes, and Exams tabs
  */
 
-import { getCourse, getDocuments, addDocument, deleteDocument, getNotes, saveNotes, getExams, saveExam, updateCourse, uploadFile } from '../services/db.js';
+import { getCourse, getDocuments, addDocument, deleteDocument, removeDuplicateDocuments, getNotes, saveNotes, getExams, saveExam, updateCourse, uploadFile } from '../services/db.js';
 import { parseFile, getFileTypeInfo, formatFileSize } from '../services/parser.js';
 import { analyseDocuments, generateNotes, generateExam } from '../services/gemini.js';
 import { createUploadZone, renderFileList } from '../components/UploadZone.js';
@@ -101,6 +101,10 @@ async function renderDocumentsTab(container, courseId, courseName) {
     container.querySelector('#upload-zone-container'),
     (files) => handleFileUpload(files, courseId, courseName)
   );
+
+  // Auto-remove any existing duplicates silently
+  const removed = await removeDuplicateDocuments(courseId);
+  if (removed > 0) showToast(`🧹 Removed ${removed} duplicate file${removed > 1 ? 's' : ''}`, 'info', 4000);
 
   const docs = await getDocuments(courseId);
   renderDocumentList(container.querySelector('#file-list-container'), docs, courseId, courseName);
@@ -223,88 +227,48 @@ function renderDocumentList(container, docs, courseId, courseName) {
 
 async function viewDocument(doc) {
   const { showModal } = await import('../components/Modal.js');
-  const name = doc.name || '';
+  const name = doc.name || 'Document';
   const mime = doc.mimeType || '';
-  const url  = doc.url || '';
+  const url  = doc.url  || '';
+
+  if (!url) {
+    showToast('No preview available — file URL is missing', 'error');
+    return;
+  }
 
   const isImage = mime.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(name);
-  const isPDF   = mime === 'application/pdf' || /\.pdf$/i.test(name);
-  const isText  = mime.startsWith('text/') || /\.(txt|md|csv|json)$/i.test(name);
+  const isPDF   = mime === 'application/pdf'  || /\.pdf$/i.test(name);
 
-  // ── Images ────────────────────────────────────────────────────────────────
-  if (isImage && url) {
+  // ── Images — show inline, no download needed ──────────────────────────────
+  if (isImage) {
     showModal({
       title: `🖼️ ${name}`,
-      body: `<div style="text-align:center"><img src="${url}" alt="${name}" style="max-width:100%;max-height:65vh;object-fit:contain;border-radius:8px;" /></div>`,
+      body: `
+        <div style="text-align:center;background:var(--bg-base);border-radius:var(--radius-md);padding:1rem">
+          <img src="${url}" alt="${name}"
+               style="max-width:100%;max-height:65vh;object-fit:contain;border-radius:6px;"
+               loading="lazy" />
+        </div>`,
       footer: `<a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open full size ↗</a>`,
       onClose: () => {},
     });
     return;
   }
 
-  // ── PDFs ──────────────────────────────────────────────────────────────────
-  if (isPDF && url) {
+  // ── PDFs — embed directly in an iframe ───────────────────────────────────
+  if (isPDF) {
     showModal({
       title: `📄 ${name}`,
-      body: `<iframe src="${url}" style="width:100%;height:65vh;border:none;border-radius:8px;background:#fff" title="${name}"></iframe>`,
+      body: `<iframe src="${url}#toolbar=1" style="width:100%;height:70vh;border:none;border-radius:var(--radius-md);" title="${name}"></iframe>`,
       footer: `<a href="${url}" target="_blank" rel="noopener" class="btn btn-secondary">Open in new tab ↗</a>`,
       onClose: () => {},
     });
     return;
   }
 
-  // ── All other formats: parse and show text preview ─────────────────────
-  const loadingModal = showModal({
-    title: `👁 ${name}`,
-    body: `<div style="text-align:center;padding:3rem"><div style="font-size:2.5rem">⏳</div><p style="margin-top:0.75rem;color:var(--text-muted)">Extracting content...</p></div>`,
-    footer: '',
-    onClose: () => {},
-  });
-
-  try {
-    let file;
-    if (url) {
-      const resp = await fetch(url);
-      const blob = await resp.blob();
-      file = new File([blob], name, { type: mime });
-    } else {
-      throw new Error('No URL available for this document');
-    }
-
-    const parsed = await parseFile(file);
-    const content = parsed.content || '';
-    const preview = content.length > 12000 ? content.slice(0, 12000) + '\n\n… [content truncated]' : content;
-
-    const modalBody = loadingModal.el.querySelector('.modal-body');
-    if (modalBody) {
-      if (parsed.type === 'image') {
-        modalBody.innerHTML = `<div style="text-align:center"><img src="data:${parsed.mimeType};base64,${parsed.base64}" alt="${name}" style="max-width:100%;max-height:65vh;object-fit:contain;border-radius:8px"/></div>`;
-      } else {
-        modalBody.innerHTML = `
-          <div style="max-height:65vh;overflow-y:auto">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
-              <span style="font-size:0.75rem;color:var(--text-muted)">${content.length.toLocaleString()} characters extracted</span>
-              <button class="btn btn-secondary btn-sm" id="copy-doc-text">📋 Copy Text</button>
-            </div>
-            <pre style="white-space:pre-wrap;word-break:break-word;font-size:0.8rem;color:var(--text-secondary);line-height:1.65;font-family:var(--font-mono);background:var(--bg-base);padding:1rem;border-radius:var(--radius-md);border:1px solid var(--border)">${escapeHtml(preview)}</pre>
-          </div>
-        `;
-        modalBody.querySelector('#copy-doc-text')?.addEventListener('click', () => {
-          navigator.clipboard.writeText(content);
-          showToast('Text copied!', 'success');
-        });
-      }
-    }
-  } catch (err) {
-    const modalBody = loadingModal.el.querySelector('.modal-body');
-    if (modalBody) {
-      modalBody.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--error)">❌ Could not preview this file: ${err.message}</div>`;
-    }
-  }
-}
-
-function escapeHtml(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  // ── All other formats (DOCX, PPTX, XLSX, etc.) — open/download directly ─
+  // Browser handles it: Office files trigger a download, no parsing needed.
+  window.open(url, '_blank', 'noopener');
 }
 
 

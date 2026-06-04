@@ -153,6 +153,31 @@ export async function deleteDocument(id, courseId) {
   if (c) { c.documents_count = Math.max(0, (c.documents_count || 1) - 1); lsSet(`courses_${courseId}`, c); }
 }
 
+/**
+ * Remove duplicate documents within a course (same filename, case-insensitive).
+ * Keeps the newest upload, deletes the rest.
+ * Returns the number of duplicates removed.
+ */
+export async function removeDuplicateDocuments(courseId) {
+  const docs = await getDocuments(courseId);
+  // docs are sorted newest-first; first occurrence = keeper
+  const seen = new Set();
+  const toDelete = [];
+  for (const doc of docs) {
+    const key = doc.name.toLowerCase().trim();
+    if (seen.has(key)) {
+      toDelete.push(doc);
+    } else {
+      seen.add(key);
+    }
+  }
+  for (const doc of toDelete) {
+    await deleteDocument(doc.id, courseId);
+  }
+  return toDelete.length;
+}
+
+
 // ─── Notes ────────────────────────────────────────────────────────────────────
 
 export async function saveNotes(courseId, content) {
