@@ -374,7 +374,7 @@ async function runAIGeneration(courseId, courseName, mode = 'both') {
     <div class="card" style="max-width:480px;width:90%;padding:2.5rem;text-align:center">
       <div class="ai-brain-icon" style="font-size:4rem;margin-bottom:1rem;display:block">🧠</div>
       <div class="ai-progress-text" id="ai-progress-text">Preparing documents...</div>
-      <div class="ai-progress-sub" id="ai-progress-sub">This may take 30–90 seconds depending on document size</div>
+      <div class="ai-progress-sub" id="ai-progress-sub">This may take 30 seconds to a few minutes for large documents</div>
       <div class="progress-bar-wrap" style="margin-top:1.5rem;max-width:100%">
         <div class="progress-bar-fill" id="ai-progress-bar" style="width:5%"></div>
       </div>
@@ -401,17 +401,10 @@ async function runAIGeneration(courseId, courseName, mode = 'both') {
     const parsedDocs = [];
     for (const doc of docs) {
       try {
-        // For stored documents, fetch from URL if available
-        if (doc.url && !doc.url.startsWith('data:')) {
-          // Fetch from Supabase Storage
+        // Fetch from Supabase Storage URL or data URL, then parse
+        if (doc.url) {
           const resp = await fetch(doc.url);
-          const blob = await resp.blob();
-          const file = new File([blob], doc.name, { type: doc.mimeType });
-          const parsed = await parseFile(file);
-          parsedDocs.push(parsed);
-        } else if (doc.url && doc.url.startsWith('data:')) {
-          // Data URL — convert back to file
-          const resp = await fetch(doc.url);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           const blob = await resp.blob();
           const file = new File([blob], doc.name, { type: doc.mimeType });
           const parsed = await parseFile(file);
@@ -465,7 +458,7 @@ async function runAIGeneration(courseId, courseName, mode = 'both') {
   } catch (err) {
     overlay.remove();
     console.error('AI generation error:', err);
-    showToast(`Generation failed: ${err.message}`, 'error', 6000);
+    showToast(`Generation failed: ${err.message}`, 'error', 8000);
   }
 }
 
