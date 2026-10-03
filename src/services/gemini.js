@@ -1,6 +1,8 @@
 /**
- * Gemini AI Service — wraps Google Generative AI for StudyMate.
- * Handles document analysis, study note generation, and exam creation.
+ * Gemini AI Service — document analysis, study note generation, and exam creation.
+ *
+ * Every Gemini call goes through the /api/gemini serverless proxy (api/gemini.js), which holds the
+ * API key, so nothing secret is shipped to the browser.
  *
  * Large documents are split into chunks and requests are paced so the free tier's
  * 250k input-tokens-per-minute limit isn't exceeded. 429/5xx errors are retried.
@@ -9,6 +11,7 @@
 import { getAnalysePrompt, getNotesPrompt } from '../prompts/analysePrompt.js';
 import { getExamPrompt } from '../prompts/examPrompt.js';
 
+const API_URL = '/api/gemini';
 const MODEL = 'gemini-2.5-flash'; // confirmed available for this API key
 // Used when the primary model's daily quota is exhausted (separate free-tier quota).
 const FALLBACK_MODEL = 'gemini-2.5-flash-lite';
@@ -17,31 +20,94 @@ const FALLBACK_MODEL = 'gemini-2.5-flash-lite';
 const TOKENS_PER_MINUTE = 200_000;
 // Max estimated input tokens sent in a single analysis request.
 const CHUNK_TOKENS = 120_000;
+// The proxy rejects request bodies over ~4 MB, so keep each chunk's payload well below that.
+const MAX_CHUNK_BYTES = 3_000_000;
+const MAX_IMAGE_BASE64 = 2_500_000;
 // Conservative estimate (real ratio is ~4 chars/token for English).
 const CHARS_PER_TOKEN = 3;
 const IMAGE_TOKENS = 1_500;
 const MAX_RETRIES = 4;
 
-function getApiKey() {
-  // A key the user saved in Settings takes priority over the build-time key.
-  return localStorage.getItem('studymate_gemini_key') || import.meta.env.VITE_GEMINI_API_KEY || '';
+/** Optional personal key saved in Settings. It overrides the server's key when present. */
+function getUserKey() {
+  return localStorage.getItem('studymate_gemini_key')?.trim() || '';
 }
 
 let activeModel = MODEL;
 
-async function getModel(temperature = 0.4) {
-  const key = getApiKey();
-  if (!key) throw new Error('Gemini API key not configured. Please go to Settings.');
-  const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genAI = new GoogleGenerativeAI(key);
-  return genAI.getGenerativeModel({
-    model: activeModel,
-    generationConfig: {
-      temperature,
-      topP: 0.9,
-      maxOutputTokens: 65536, // gemini-2.5-flash supports up to 65k output tokens
-    },
-  });
+// ─── Transport ────────────────────────────────────────────────────────────────
+
+const apiError = (status, message, extra = {}) => Object.assign(new Error(message), { status, ...extra });
+
+/** Error for a non-2xx answer from our own endpoint (misconfiguration, size limit, …) — never retried. */
+async function httpError(res) {
+  const data = await res.json().catch(() => null);
+  if (res.status === 404) {
+    return apiError(404, 'The AI endpoint (/api/gemini) was not found. Run the app with "npm run dev", or make sure the api/ folder is deployed.', { fatal: true });
+  }
+  if (res.status === 413) {
+    return apiError(413, 'These documents are too large to send in one request. Try fewer or smaller files.', { fatal: true });
+  }
+  return apiError(res.status, data?.error || res.statusText || 'AI request failed', { fatal: true });
+}
+
+/**
+ * One request to the proxy. Resolves with { text, finishReason, blockReason } once the stream ends.
+ * Rejects with an Error carrying `status` (and `details` for Gemini errors).
+ */
+async function callGemini({ model, parts, temperature = 0.4, maxOutputTokens = 65536, apiKey = getUserKey() }) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['x-user-api-key'] = apiKey;
+
+  let res;
+  try {
+    res = await fetch(API_URL, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model, parts, generationConfig: { temperature, topP: 0.9, maxOutputTokens } }),
+    });
+  } catch {
+    throw apiError(503, 'Network error — check your connection and try again.');
+  }
+  if (!res.ok) throw await httpError(res);
+
+  const decoder = new TextDecoder();
+  const reader = res.body.getReader();
+  let buffer = '';
+  let text = '';
+  let summary = null;
+
+  const handleLine = (line) => {
+    if (!line) return;
+    let msg;
+    try { msg = JSON.parse(line); } catch { return; }
+    if (msg.error) {
+      throw apiError(msg.error.status, msg.error.message || 'Gemini request failed', { details: msg.error.details });
+    }
+    if (msg.t) text += msg.t;
+    if (msg.done) summary = msg;
+  };
+
+  for (;;) {
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch {
+      throw apiError(503, 'The connection to the AI service was interrupted.');
+    }
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    let newline;
+    while ((newline = buffer.indexOf('\n')) !== -1) {
+      handleLine(buffer.slice(0, newline).trim());
+      buffer = buffer.slice(newline + 1);
+    }
+  }
+  handleLine(buffer.trim());
+
+  // No closing message means the stream was cut off (e.g. a dropped connection) — safe to retry.
+  if (!summary) throw apiError(503, 'The connection to the AI service was interrupted.');
+  return { text: text.trim(), finishReason: summary.finishReason, blockReason: summary.blockReason };
 }
 
 // ─── Rate limiting & retries ──────────────────────────────────────────────────
@@ -69,51 +135,49 @@ async function waitForTokenBudget(tokens, onWait) {
   sentLog.push({ time: Date.now(), tokens });
 }
 
-const errText = (err) => String(err?.message || err || '');
+const errText = (err) => `${err?.message || err || ''} ${err?.details || ''}`;
 
 function parseRetryDelay(err) {
-  const msg = errText(err);
-  const m = msg.match(/retry in ([\d.]+)s/i) || msg.match(/"retryDelay":"(\d+)s"/);
+  const m = errText(err).match(/retry in ([\d.]+)s/i) || errText(err).match(/"retryDelay"\s*:\s*\\?"(\d+(?:\.\d+)?)s/);
   return m ? Math.ceil(parseFloat(m[1])) : null;
 }
 
-function isRateLimit(err) {
-  return err?.status === 429 || /\b429\b|quota|rate.?limit/i.test(errText(err));
-}
-
-function isDailyQuota(err) {
-  return /PerDay|per day/i.test(errText(err));
-}
-
-function isTransient(err) {
-  return [500, 502, 503, 504].includes(err?.status) || /\b(500|502|503|504)\b|overloaded|unavailable/i.test(errText(err));
-}
+const isRateLimit = (err) => err?.status === 429;
+const isTransient = (err) => [500, 502, 503, 504].includes(err?.status);
+// Gemini names the exhausted quota in the error details, e.g. "GenerateRequestsPerDayPerProjectPerModel-FreeTier".
+const isDailyQuota = (err) => /PerDay|per day/i.test(errText(err));
 
 function friendlyError(err) {
   if (isRateLimit(err)) {
     return new Error(isDailyQuota(err)
-      ? 'Daily Gemini free-tier quota reached. Try again tomorrow, or add an API key with billing enabled in Settings.'
+      ? 'Daily Gemini free-tier quota reached. Try again tomorrow, or add your own API key with billing enabled in Settings.'
       : 'Gemini rate limit reached. Please wait a minute and try again.');
   }
-  if (isTransient(err)) return new Error('Gemini is temporarily overloaded. Please try again in a moment.');
+  if (isTransient(err) && !err.fatal) return new Error('Gemini is temporarily overloaded. Please try again in a moment.');
   return err;
 }
 
 /**
- * Calls generateContent with token pacing, 429/5xx retries, and a fallback model
- * when the primary model's daily quota is exhausted.
+ * Sends a prompt (string or content parts) with token pacing, 429/5xx retries, and a fallback
+ * model when the primary model's daily quota is exhausted. Resolves with the generated text.
  */
 async function generate(content, { temperature = 0.4, onStatus } = {}) {
-  const tokens = estimateTokens(content);
+  const parts = typeof content === 'string' ? [{ text: content }] : content;
+  const tokens = estimateTokens(parts);
   let lastErr;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     await waitForTokenBudget(tokens, (s) => onStatus?.(`Pacing requests to stay within the free-tier limit — ${s}s...`));
     try {
-      const model = await getModel(temperature);
-      const result = await model.generateContent(content);
-      return result.response.text().trim();
+      const { text, finishReason, blockReason } = await callGemini({ model: activeModel, parts, temperature });
+      if (!text) {
+        throw new Error(blockReason
+          ? `Gemini blocked this request (${blockReason}). Try different documents.`
+          : `Gemini returned an empty response${finishReason ? ` (${finishReason})` : ''}. Please try again.`);
+      }
+      return text;
     } catch (err) {
       lastErr = err;
+      if (err.fatal) break;
       if (isRateLimit(err) && isDailyQuota(err)) {
         if (activeModel === FALLBACK_MODEL) break;
         activeModel = FALLBACK_MODEL;
@@ -148,6 +212,10 @@ function buildContentParts(parsedDocs) {
       const text = doc.content.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n');
       parts.push(...splitText(text, CHUNK_TOKENS * CHARS_PER_TOKEN));
     } else if (doc.type === 'image') {
+      if (doc.base64.length > MAX_IMAGE_BASE64) {
+        parts.push({ text: `[Image file: ${doc.name} — too large to analyse, skipped]` });
+        continue;
+      }
       parts.push({ inlineData: { mimeType: doc.mimeType, data: doc.base64 } });
       parts.push({ text: `[Image file: ${doc.name}]` });
     }
@@ -170,22 +238,34 @@ function splitText(text, maxChars) {
   return parts;
 }
 
-/** Groups content parts into chunks that each fit within CHUNK_TOKENS. */
+const encoder = new TextEncoder();
+
+/** Approximate size of a part in the JSON request body. */
+function partBytes(part) {
+  if (part.inlineData) return part.inlineData.data.length + 100;
+  return Math.ceil(encoder.encode(part.text).length * 1.15); // allow for JSON escaping
+}
+
+/** Groups content parts into chunks that each fit within CHUNK_TOKENS and MAX_CHUNK_BYTES. */
 function chunkParts(parts) {
   const chunks = [];
   let current = [];
-  let size = 0;
+  let tokens = 0;
+  let bytes = 0;
   for (let i = 0; i < parts.length; i++) {
     // Keep an image together with its "[Image file: ...]" label.
     const group = parts[i].inlineData && parts[i + 1]?.text ? [parts[i], parts[++i]] : [parts[i]];
-    const t = estimateTokens(group);
-    if (current.length && size + t > CHUNK_TOKENS) {
+    const groupTokens = estimateTokens(group);
+    const groupBytes = group.reduce((sum, p) => sum + partBytes(p), 0);
+    if (current.length && (tokens + groupTokens > CHUNK_TOKENS || bytes + groupBytes > MAX_CHUNK_BYTES)) {
       chunks.push(current);
       current = [];
-      size = 0;
+      tokens = 0;
+      bytes = 0;
     }
     current.push(...group);
-    size += t;
+    tokens += groupTokens;
+    bytes += groupBytes;
   }
   if (current.length) chunks.push(current);
   return chunks;
@@ -350,16 +430,26 @@ export async function generateExam(courseName, analysisJson, onProgress) {
 }
 
 /**
- * Validate that the Gemini API key works.
+ * Whether the server has a Gemini key configured: true / false, or null if the endpoint is unreachable.
  */
-export async function testApiKey(key) {
+export async function getServerKeyStatus() {
   try {
-    const { GoogleGenerativeAI } = await import('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(key);
-    const model = genAI.getGenerativeModel({ model: MODEL });
-    await model.generateContent('Say OK');
+    const res = await fetch(API_URL);
+    if (!res.ok) return null;
+    return (await res.json()).configured === true;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check that a Gemini key works. Pass the key typed in Settings, or '' to test the server's key.
+ */
+export async function testApiKey(key = '') {
+  try {
+    await callGemini({ model: MODEL, parts: [{ text: 'Reply with the single word OK.' }], maxOutputTokens: 256, apiKey: key });
     return { success: true };
   } catch (e) {
-    return { success: false, error: e.message };
+    return { success: false, error: friendlyError(e).message };
   }
 }

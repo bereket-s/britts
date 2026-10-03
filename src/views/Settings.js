@@ -3,11 +3,11 @@
  */
 
 import { showToast } from '../components/Toast.js';
-import { testApiKey } from '../services/gemini.js';
+import { testApiKey, getServerKeyStatus } from '../services/gemini.js';
 import { isSupabaseEnabled, reinitSupabase } from '../supabase.js';
 
 export function renderSettings(container) {
-  const savedKey    = localStorage.getItem('studymate_gemini_key') || import.meta.env.VITE_GEMINI_API_KEY || '';
+  const savedKey    = localStorage.getItem('studymate_gemini_key') || '';
   const savedSbUrl  = localStorage.getItem('studymate_sb_url')  || import.meta.env.VITE_SUPABASE_URL  || '';
   const savedSbKey  = localStorage.getItem('studymate_sb_key')  || import.meta.env.VITE_SUPABASE_ANON_KEY || '';
   const sbEnabled   = isSupabaseEnabled();
@@ -40,19 +40,20 @@ export function renderSettings(container) {
       <!-- Gemini API Key -->
       <div class="settings-section">
         <div class="settings-section-header">
-          <div class="settings-section-title">🤖 Gemini AI API Key</div>
-          <div class="settings-section-desc">Required for document analysis, note generation, and exam creation. Get a free key at <a href="https://aistudio.google.com" target="_blank" rel="noopener" style="color:var(--accent-light)">aistudio.google.com</a></div>
+          <div class="settings-section-title">🤖 Gemini AI</div>
+          <div class="settings-section-desc">Document analysis, notes, and exams run through this app's server, which holds the Gemini API key — nothing to set up here. You can optionally use your own key instead, e.g. if the shared free-tier quota runs out. Get a free key at <a href="https://aistudio.google.com" target="_blank" rel="noopener" style="color:var(--accent-light)">aistudio.google.com</a></div>
         </div>
         <div class="settings-body">
+          <div class="form-hint" id="server-key-status" style="margin-bottom:1rem">Checking server key…</div>
           <div class="form-group">
-            <label class="form-label" for="gemini-key-input">API Key</label>
+            <label class="form-label" for="gemini-key-input">Your own API key (optional)</label>
             <div class="api-key-input-wrap">
               <input type="password" id="gemini-key-input" class="form-input"
-                     value="${savedKey}" placeholder="AQ.Ab8RN..." autocomplete="off" />
+                     value="${savedKey}" placeholder="Leave empty to use the app's key" autocomplete="off" />
               <button class="toggle-visibility" id="toggle-key-vis" title="Show/hide key">👁️</button>
               <button class="btn btn-secondary btn-sm" id="test-key-btn">Test</button>
             </div>
-            <div class="form-hint">Stored only in this browser — never sent anywhere except Google's API.</div>
+            <div class="form-hint">Stored only in this browser. When set, it is sent over HTTPS to this app's server, which forwards it to Google for each request and does not keep it.</div>
           </div>
           <button class="btn btn-primary" id="save-key-btn">💾 Save API Key</button>
         </div>
@@ -202,7 +203,7 @@ create policy "Public document access"
           <p style="font-size:0.875rem;color:var(--text-secondary);line-height:1.75">
             <strong style="color:var(--text-primary)">StudyMate AI</strong> — Upload your course documents and let AI do the heavy lifting.<br><br>
             📄 <strong>Supported formats:</strong> PDF · DOCX · PPTX · Excel · Images · TXT<br>
-            🧠 <strong>AI Engine:</strong> Gemini 1.5 Flash (Google DeepMind)<br>
+            🧠 <strong>AI Engine:</strong> Gemini 2.5 Flash (Google DeepMind)<br>
             🗄️ <strong>Database:</strong> Supabase (PostgreSQL)<br><br>
             <strong>Exam Format:</strong><br>
             Section A — 10 MCQ = <strong>10 marks</strong><br>
@@ -223,17 +224,32 @@ create policy "Public document access"
     keyInput.type = keyInput.type === 'password' ? 'text' : 'password';
   });
 
+  const statusEl = container.querySelector('#server-key-status');
+  getServerKeyStatus().then(configured => {
+    if (!statusEl) return;
+    statusEl.textContent = configured === true
+      ? '✅ The app\'s server key is active — AI features work without any setup.'
+      : configured === false
+        ? '⚠️ No server key is configured. Set GEMINI_API_KEY in your Vercel project settings (or in .env locally), or save your own key below.'
+        : '⚠️ Could not reach the AI endpoint (/api/gemini).';
+  });
+
+  // With nothing typed, the test uses the server's key.
   container.querySelector('#test-key-btn')?.addEventListener('click', async () => {
     const k = keyInput.value.trim();
-    if (!k) { showToast('Enter an API key first', 'warning'); return; }
     showToast('Testing...', 'info', 2000);
     const res = await testApiKey(k);
-    res.success ? showToast('✅ Gemini API key is valid!', 'success') : showToast('❌ ' + res.error, 'error', 6000);
+    const what = k ? 'Your Gemini API key' : 'The app\'s Gemini key';
+    res.success ? showToast(`✅ ${what} works!`, 'success') : showToast('❌ ' + res.error, 'error', 6000);
   });
 
   container.querySelector('#save-key-btn')?.addEventListener('click', () => {
     const k = keyInput.value.trim();
-    if (!k) { showToast('Enter a valid API key', 'warning'); return; }
+    if (!k) {
+      localStorage.removeItem('studymate_gemini_key');
+      showToast('Using the app\'s built-in key', 'success');
+      return;
+    }
     localStorage.setItem('studymate_gemini_key', k);
     showToast('API key saved!', 'success');
   });

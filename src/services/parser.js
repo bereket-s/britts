@@ -115,20 +115,42 @@ async function parseTXT(file) {
 
 // ─── Image ────────────────────────────────────────────────────────────────────
 
+// Images are sent to the AI through a serverless function with a ~4 MB request limit,
+// so large photos/screenshots are shrunk first (Gemini downsizes them anyway).
+const MAX_IMAGE_SIDE = 2048;
+const RECOMPRESS_ABOVE_BYTES = 1_000_000;
+
+async function downscaleImage(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; // JPEG has no transparency
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  return new Promise((resolve, reject) =>
+    canvas.toBlob(blob => (blob ? resolve(blob) : reject(new Error('Image conversion failed'))), 'image/jpeg', 0.85)
+  );
+}
+
 async function parseImage(file) {
+  const blob = file.size > RECOMPRESS_ABOVE_BYTES ? await downscaleImage(file).catch(() => file) : file;
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const base64 = e.target.result.split(',')[1];
       resolve({
         type: 'image',
-        mimeType: file.type,
+        mimeType: blob.type || file.type,
         base64,
         name: file.name,
       });
     };
     reader.onerror = reject;
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
 }
 
