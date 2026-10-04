@@ -2,9 +2,9 @@
  * Course Detail view — Documents, Notes, and Exams tabs
  */
 
-import { getCourse, getDocuments, addDocument, deleteDocument, removeDuplicateDocuments, getNotes, saveNotes, getExams, saveExam, updateCourse, uploadFile } from '../services/db.js';
+import { getCourse, getDocuments, addDocument, deleteDocument, removeDuplicateDocuments, getNotes, saveNotes, getFocusGuide, saveFocusGuide, getExams, saveExam, updateCourse, uploadFile } from '../services/db.js';
 import { parseFile, getFileTypeInfo, formatFileSize } from '../services/parser.js';
-import { analyseDocuments, generateNotes, generateExam } from '../services/gemini.js';
+import { analyseDocuments, generateNotes, generateExam, answerFocusPoints } from '../services/gemini.js';
 import { createUploadZone, renderFileList } from '../components/UploadZone.js';
 import { renderSidebar } from '../components/Sidebar.js';
 import { showToast } from '../components/Toast.js';
@@ -46,6 +46,7 @@ export async function renderCourseDetail(container, courseId) {
 
       <div class="tabs">
         <div class="tab ${activeTab === 'documents' ? 'active' : ''}" data-tab="documents">📄 Documents</div>
+        <div class="tab ${activeTab === 'focus' ? 'active' : ''}" data-tab="focus">🎯 Focus Points</div>
         <div class="tab ${activeTab === 'notes' ? 'active' : ''}" data-tab="notes">📝 Study Notes</div>
         <div class="tab ${activeTab === 'exams' ? 'active' : ''}" data-tab="exams">✏️ Practice Exams</div>
       </div>
@@ -80,6 +81,8 @@ async function renderTabContent(courseId, courseName) {
 
   if (activeTab === 'documents') {
     await renderDocumentsTab(tabContent, courseId, courseName);
+  } else if (activeTab === 'focus') {
+    await renderFocusTab(tabContent, courseId, courseName);
   } else if (activeTab === 'notes') {
     await renderNotesTab(tabContent, courseId);
   } else if (activeTab === 'exams') {
@@ -231,6 +234,98 @@ async function viewDocument(doc) {
   openDocumentViewer(doc);
 }
 
+
+// ─── Focus Points Tab ────────────────────────────────────────────────────────
+
+async function renderFocusTab(container, courseId, courseName) {
+  const guide = await getFocusGuide(courseId);
+  marked.setOptions({ breaks: true, gfm: true });
+
+  container.innerHTML = `
+    <div class="card" style="margin-bottom:1rem">
+      <div class="card-header">
+        <span class="card-title">🎯 Teacher's Focus Points &amp; Questions</span>
+      </div>
+      <div class="card-body">
+        <p style="font-size:0.85rem;color:var(--text-muted);margin-bottom:0.75rem">
+          Paste the focus points or questions your teacher gave you (one per line, or any format).
+          The AI will find the answers in this course's uploaded documents and write brief notes for each.
+        </p>
+        <textarea id="focus-input" rows="8" style="width:100%;padding:0.75rem;border-radius:8px;border:1px solid var(--border,#334);background:var(--bg-input,transparent);color:inherit;font:inherit;resize:vertical"
+          placeholder="1. Explain the 4 Ps of marketing&#10;2. Difference between push and pull strategy&#10;3. Case study: ..."></textarea>
+        <div style="display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap">
+          <button class="btn btn-primary" id="focus-generate-btn">🤖 Generate Brief Notes</button>
+          <button class="btn btn-secondary" id="focus-file-btn">📎 Load list from file</button>
+          <input type="file" id="focus-file" accept=".txt,.md,.pdf,.docx" style="display:none">
+        </div>
+      </div>
+    </div>
+    <div id="focus-result"></div>
+  `;
+
+  const input = container.querySelector('#focus-input');
+  input.value = guide?.focusText || '';
+  const result = container.querySelector('#focus-result');
+
+  const showGuide = (g) => {
+    if (!g?.content) { result.innerHTML = ''; return; }
+    result.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">📝 Your Focus Point Notes</span>
+          <div style="display:flex;gap:0.5rem;align-items:center">
+            <span style="font-size:0.78rem;color:var(--text-muted)">Generated ${formatDate(g.generatedAt)}</span>
+            <button class="btn btn-ghost btn-sm" id="focus-print-btn">🖨️ Print</button>
+          </div>
+        </div>
+        <div class="card-body note-content" id="notes-content">${marked.parse(g.content)}</div>
+      </div>`;
+    result.querySelector('#focus-print-btn')?.addEventListener('click', () => window.print());
+  };
+  showGuide(guide);
+
+  container.querySelector('#focus-file-btn').addEventListener('click', () => container.querySelector('#focus-file').click());
+  container.querySelector('#focus-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const parsed = await parseFile(file);
+      if (parsed.type !== 'text') throw new Error('Could not read text from that file');
+      input.value = (input.value ? input.value + '\n' : '') + parsed.content.trim();
+    } catch (err) {
+      showToast(`Could not load ${file.name}: ${err.message}`, 'error');
+    }
+  });
+
+  const genBtn = container.querySelector('#focus-generate-btn');
+  genBtn.addEventListener('click', async () => {
+    const focusText = input.value.trim();
+    if (!focusText) { showToast('Paste your focus points or questions first', 'warning'); return; }
+    const docs = await getDocuments(courseId);
+    if (docs.length === 0) { showToast('Upload course documents first (Documents tab)', 'warning'); return; }
+
+    genBtn.disabled = true;
+    const setStatus = (msg) => {
+      result.innerHTML = `<div class="ai-processing"><span class="ai-brain-icon">🧠</span><p class="ai-progress-text">${msg}</p></div>`;
+    };
+    try {
+      setStatus('Reading your documents...');
+      const parsedDocs = await parseCourseDocuments(docs);
+      if (parsedDocs.length === 0) throw new Error('Could not parse any documents. Please re-upload them.');
+      const name = courseName || (await getCourse(courseId))?.name || 'Course';
+      const content = await answerFocusPoints(name, focusText, parsedDocs, (msg) => setStatus(msg));
+      showGuide(await saveFocusGuide(courseId, { focusText, content }));
+      showToast('Focus point notes ready! 🎯', 'success');
+    } catch (err) {
+      console.error('Focus generation error:', err);
+      showGuide(guide);
+      showToast(`Generation failed: ${err.message}`, 'error', 8000);
+    } finally {
+      genBtn.disabled = false;
+    }
+  });
+}
 
 // ─── Notes Tab ───────────────────────────────────────────────────────────────
 
@@ -397,23 +492,7 @@ async function runAIGeneration(courseId, courseName, mode = 'both') {
   try {
     setProgress('Parsing documents...', 10, 'Extracting text from your files', 'Step 1 of 3: Parsing');
 
-    // Parse all documents
-    const parsedDocs = [];
-    for (const doc of docs) {
-      try {
-        // Fetch from Supabase Storage URL or data URL, then parse
-        if (doc.url) {
-          const resp = await fetch(doc.url);
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const blob = await resp.blob();
-          const file = new File([blob], doc.name, { type: doc.mimeType });
-          const parsed = await parseFile(file);
-          parsedDocs.push(parsed);
-        }
-      } catch (err) {
-        console.warn(`Could not parse ${doc.name}:`, err);
-      }
-    }
+    const parsedDocs = await parseCourseDocuments(docs);
 
     if (parsedDocs.length === 0) {
       throw new Error('Could not parse any documents. Please re-upload them.');
@@ -460,6 +539,23 @@ async function runAIGeneration(courseId, courseName, mode = 'both') {
     console.error('AI generation error:', err);
     showToast(`Generation failed: ${err.message}`, 'error', 8000);
   }
+}
+
+/** Fetches each stored document and extracts its text/image content, skipping files that fail. */
+async function parseCourseDocuments(docs) {
+  const parsedDocs = [];
+  for (const doc of docs) {
+    try {
+      if (!doc.url) continue;
+      const resp = await fetch(doc.url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      parsedDocs.push(await parseFile(new File([blob], doc.name, { type: doc.mimeType })));
+    } catch (err) {
+      console.warn(`Could not parse ${doc.name}:`, err);
+    }
+  }
+  return parsedDocs;
 }
 
 function formatDate(iso) {

@@ -208,6 +208,19 @@ export async function getNotes(courseId) {
   return normalise(lsGet(`notes_${courseId}`));
 }
 
+// ─── Focus guide (teacher's focus points + generated answers) ─────────────────
+// Kept in this browser's localStorage so no Supabase schema change is needed.
+
+export async function saveFocusGuide(courseId, { focusText, content }) {
+  const record = { courseId, focusText, content, generatedAt: new Date().toISOString() };
+  lsSet(`focus_${courseId}`, record);
+  return record;
+}
+
+export async function getFocusGuide(courseId) {
+  return lsGet(`focus_${courseId}`);
+}
+
 // ─── Exams ────────────────────────────────────────────────────────────────────
 
 export async function saveExam(courseId, examData) {

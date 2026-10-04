@@ -10,6 +10,7 @@
 
 import { getAnalysePrompt, getNotesPrompt } from '../prompts/analysePrompt.js';
 import { getExamPrompt } from '../prompts/examPrompt.js';
+import { getFocusExtractPrompt, getFocusAnswerPrompt } from '../prompts/focusPrompt.js';
 
 const API_URL = '/api/gemini';
 const MODEL = 'gemini-2.5-flash'; // confirmed available for this API key
@@ -427,6 +428,42 @@ export async function generateExam(courseName, analysisJson, onProgress) {
   onProgress?.('Processing exam questions...', 80);
 
   return extractJson(text);
+}
+
+/**
+ * Answers the teacher's focus points / questions from the course documents.
+ * Small material goes in one request; large material is first reduced to per-point extracts.
+ * Returns markdown study notes.
+ */
+export async function answerFocusPoints(courseName, focusText, parsedDocs, onProgress) {
+  const chunks = chunkParts(buildContentParts(parsedDocs));
+  if (chunks.length === 0) throw new Error('No readable text found in the documents.');
+  const DOCS_BEGIN = { text: '\n\n--- COURSE DOCUMENTS BEGIN ---\n\n' };
+  const DOCS_END = { text: '\n\n--- COURSE DOCUMENTS END ---' };
+
+  if (chunks.length === 1) {
+    onProgress?.('Answering your focus points...', 40);
+    return generate([
+      { text: getFocusAnswerPrompt(courseName, focusText, '', false) },
+      DOCS_BEGIN, ...chunks[0], DOCS_END,
+    ], { temperature: 0.3, onStatus: (msg) => onProgress?.(msg, 40) });
+  }
+
+  const extracts = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const pct = 15 + Math.round((i / chunks.length) * 55);
+    onProgress?.(`Searching documents for your focus points (part ${i + 1} of ${chunks.length})...`, pct);
+    const partNote = `\n- This is part ${i + 1} of ${chunks.length} of the course material.`;
+    extracts.push(await generate([
+      { text: getFocusExtractPrompt(courseName, focusText, partNote) },
+      DOCS_BEGIN, ...chunks[i], DOCS_END,
+    ], { temperature: 0.2, onStatus: (msg) => onProgress?.(msg, pct) }));
+  }
+
+  onProgress?.('Writing your brief study notes...', 75);
+  const material = extracts.map((e, i) => `--- EXTRACTS FROM PART ${i + 1} ---\n${e}`).join('\n\n');
+  return generate(getFocusAnswerPrompt(courseName, focusText, material, true),
+    { temperature: 0.3, onStatus: (msg) => onProgress?.(msg, 75) });
 }
 
 /**
